@@ -9,7 +9,7 @@ node main.js
 
 Then fill the `config.json` file:
 
-```json
+```json5
 {
     "username": "example@naga.com", // nico nico account
     "password": "Fakepassw0rd",
@@ -34,7 +34,7 @@ No Access Need. By default it'll only get data in current month.
 
 Request:
 
-```json
+```json5
 {
     "status": 200,
     "report": [
@@ -69,7 +69,7 @@ Need secret token.
 
 Request:
 
-```json
+```json5
 {
     "secret": "YourSecret",
     "custom": false,
@@ -86,7 +86,7 @@ Request:
 
 Response:
 
-```json
+```json5
 {
     // there will be a time stamp for indexing custom haihu.
     // time stamp is not precisely equal to `/order_report_list` API.
@@ -99,7 +99,7 @@ Response:
 
 Request:
 
-```json
+```json5
 {
     "secret": "YourSecret",
     "majsoul_url": "https://game.maj-soul.com/1/?paipu=************"
@@ -108,7 +108,7 @@ Request:
 
 Response:
 
-```json
+```json5
 {
     "status": 200,
     "message": [
@@ -119,4 +119,4 @@ Response:
 }
 ```
 
-**array at `response.message`** can be used to **haihus** in `/order` request. You could use some elements of them to analyze part of custom haihus.
+**Array at `response.message`** can be used to **haihus** in `/order` request. You could use some elements or all of them to analyze part of custom haihus.
