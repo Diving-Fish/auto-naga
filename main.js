@@ -16,7 +16,8 @@ function delay(time) {
 }
 
 var global = {
-  majsoul_free: true
+  majsoul_free: true,
+  first_majsoul_haihu: true
 };
 
 if (!fs.existsSync("config.json")) {
@@ -77,7 +78,7 @@ global.app.get('/order_report_list', async (req, res) => {
 global.app.post('/transfer_majsoul', async (req, res) => {
   const secret = req.body.secret;
   if (secret == undefined || md5(secret) != loginContext.secret_md5) {
-    res.send({ "message": "secret error" })
+    res.send({ "status": 400, "message": "secret error" })
     return;
   }
   res.send(await parse_majsoul_url(req.body.majsoul_url));
@@ -86,7 +87,7 @@ global.app.post('/transfer_majsoul', async (req, res) => {
 global.app.post('/order', async (req, res) => {
   const secret = req.body.secret;
   if (secret == undefined || md5(secret) != loginContext.secret_md5) {
-    res.send({ "message": "secret error" })
+    res.send({ "status": 400, "message": "secret error" })
     return;
   }
   if (req.body.custom) {
@@ -150,7 +151,7 @@ async function parse_majsoul_url(url) {
       }
       var timeout = 0;
 
-      while (timeout < 60) {
+      while (timeout < 60 && global.first_majsoul_haihu) {
         await delay(1000);
         timeout++;
         await page_majsoul.mouse.click(520, 210);
@@ -163,6 +164,7 @@ async function parse_majsoul_url(url) {
           const input_pw = await page_majsoul.$("input")
           await delay(500);
           await input_pw.type(loginContext.majsoul_password)
+          global.first_majsoul_haihu = false;
           break;
         }
       }
@@ -175,7 +177,7 @@ async function parse_majsoul_url(url) {
         timeout++;
         global.majsoul_data = await page_majsoul.evaluate(async () => {
           return await new Promise((resolve, reject) => {
-            if (GameMgr.Inst.record_uuid === '') {
+            if (this['GameMgr'] === undefined || GameMgr.Inst.record_uuid === '') {
               resolve(false);
               return;
             }
