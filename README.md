@@ -95,7 +95,7 @@ Response:
 }
 ```
 
-### Post `/transfer_majsoul`
+### Post `/convert_majsoul`
 
 Request:
 

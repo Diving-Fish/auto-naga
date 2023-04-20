@@ -75,7 +75,7 @@ global.app.get('/order_report_list', async (req, res) => {
   res.send(resp.data);
 })
 
-global.app.post('/transfer_majsoul', async (req, res) => {
+global.app.post('/convert_majsoul', async (req, res) => {
   const secret = req.body.secret;
   if (secret == undefined || md5(secret) != loginContext.secret_md5) {
     res.send({ "status": 400, "message": "secret error" })
