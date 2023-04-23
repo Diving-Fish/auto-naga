@@ -625,26 +625,27 @@ function parse(record, mjslog, matchmode_map_, fan_map_) {
     return res;
 }
 
-function binaryToUrls(majsoul_data) {
+export function binaryToUrls(majsoul_data) {
     let results = parse(majsoul_data.record, majsoul_data.mjslog, majsoul_data.matchmode_map_, majsoul_data.fan_map_);
     //Format to NAGA  and copy to clipboard
-    myObj = results;
+    let myObj = results;
     var winnerIdx = 0;
     //console.log(myObj.log[0][0][0]);
 
-    for (x in myObj.log) {
+    for (const x in myObj.log) {
 
         //find winner e=0 s=1 w=2 n=3
-        for (z in myObj.log[x][myObj.log[x].length - 1][1]) {
+        for (const z in myObj.log[x][myObj.log[x].length - 1][1]) {
             if (myObj.log[x][myObj.log[x].length - 1][1][z] > 0) {
                 winnerIdx = z;
             }
         }
         //console.log(myObj.log[x][myObj.log[x].length-1][2])
 
-        for (a in myObj.log[x][myObj.log[x].length - 1]) {
-            for (z in myObj.log[x][myObj.log[x].length - 1][a]) {
-                if (typeof (myObj.log[x][myObj.log[x].length - 1][a][z]) === 'string') {
+        for (const a in myObj.log[x][myObj.log[x].length - 1]) {
+            for (const z in myObj.log[x][myObj.log[x].length - 1][a]) {
+                if (typeof (myObj.log[x][myObj.log[x].length - 1][a][z]) === 'string'
+                    && myObj.log[x][myObj.log[x].length - 1][a].constructor.name === 'Array') {
                     //replace round wind yakuhai names
                     if (myObj.log[x][0][0] <= 3) {
                         myObj.log[x][myObj.log[x].length - 1][a][z] = myObj.log[x][myObj.log[x].length - 1][a][z].replace('役牌:場風牌', '場風 東');
@@ -677,7 +678,7 @@ function binaryToUrls(majsoul_data) {
         }
         //console.log(myObj.log[x][myObj.log[x].length-1][2])
 
-        formattedObj = {};
+        const formattedObj = {};
         formattedObj.title = myObj.title;
         formattedObj.name = myObj.name;
         formattedObj.rule = myObj.rule;
@@ -691,8 +692,4 @@ function binaryToUrls(majsoul_data) {
         nagaOutput.push(formattedObj);
     }
     return nagaOutput;
-}
-
-module.exports = {
-    binaryToUrls
 }

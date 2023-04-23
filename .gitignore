@@ -1,3 +1,4 @@
 node_modules
 config.json
-cookie_cache
+naga_user.json
+.idea

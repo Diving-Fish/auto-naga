@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "A package for automatically transfer paipu string to naga analyze result.",
   "main": "main.js",
+  "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -15,6 +16,7 @@
     "js-md5": "^0.7.3",
     "moment-timezone": "^0.5.43",
     "puppeteer": "^19.9.1",
-    "readline-sync": "^1.4.10"
+    "readline-sync": "^1.4.10",
+    "ws": "^8.13.0"
   }
 }
