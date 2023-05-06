@@ -11,15 +11,26 @@ Then fill the `config.json` file:
 
 ```json5
 {
-    "username": "example@naga.com", // nico nico account
-    "password": "Fakepassw0rd",
-    "secret_md5": "", // use your favorite token and use md5 to hash it.
     "majsoul_user": "SiMoMo", // majsoul account
-    "majsoul_password": "Fakepassw1rd"
+    "majsoul_password": "Fakepassw0rd"
 }
 ```
 
-Restart again:
+Restart again, and use a websocket to add user:
+
+```js
+ws1 = new WebSocket("ws://localhost:3166/new_naga_account")
+// request username
+ws1.send("naga_account@xxx.com")
+// request password
+ws1.send("Fakepassword")
+// request secret
+ws1.send("YourSecret")
+// request verify2 (only on new network environment)
+ws1.send("114514")
+```
+
+Terminal output:
 
 ```
 > node main.js
