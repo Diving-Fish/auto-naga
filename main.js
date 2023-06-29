@@ -168,6 +168,7 @@ global.app.post('/convert_majsoul', async (req, res) => {
 
 global.app.post('/order', async (req, res) => {
     const secret = req.body.secret;
+    const player_types = req.body.player_types;
     const nagaUser = global.nagaUsers.getBySecret(md5(secret));
     if (nagaUser === undefined) {
         res.send({ "status": 400, "message": "secret error" })
@@ -188,10 +189,10 @@ global.app.post('/order', async (req, res) => {
             formData.append('game_type', 0);
         } else {
             formData.append('haihu_id', log);
+            formData.append('reanalysis', 0);
         }
         formData.append('seat', seat);
-        formData.append('reanalysis', 0);
-        formData.append('player_type', 2);
+        formData.append('player_types', player_types);
         for (const cookie of nagaUser.cookies) {
             if (cookie.name === "csrftoken") {
                 formData.append('csrfmiddlewaretoken', cookie.value)
