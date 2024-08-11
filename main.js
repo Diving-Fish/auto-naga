@@ -346,7 +346,7 @@ async function create_naga_user_context(nagaUser, webSocket) {
     nagaUser.webPage = page_naga;
 
     try {
-        await page_naga.goto('https://naga.dmv.nico/niconico/login/');
+        await page_naga.goto('https://naga.dmv.nico/niconico/niconico_login/');
 
         if (page_naga.url().startsWith("https://account.nicovideo.jp/login")) {
             await page_naga.type('#input__mailtel', nagaUser.username)
