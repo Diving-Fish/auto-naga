@@ -156,6 +156,18 @@ global.app.get('/order_report_list', async (req, res) => {
     res.send(resp);
 })
 
+global.app.post('/user_info', async (req, res) => {
+    const secret = req.body.secret;
+    const nagaUser = global.nagaUsers.getBySecret(md5(secret));
+    if (nagaUser === undefined) {
+        res.send({ "status": 400, "message": "secret error" })
+        return;
+    }
+    res.send({
+        "username": nagaUser.username
+    });
+})
+
 global.app.post('/convert_majsoul', async (req, res) => {
     const secret = req.body.secret;
     const nagaUser = global.nagaUsers.getBySecret(md5(secret));
@@ -234,6 +246,7 @@ async function parse_majsoul_url(url) {
                 }
             }
             var timeout = 0;
+            await delay(3000);
 
             while (timeout < 60 && global.first_majsoul_haihu) {
                 await delay(1000);
