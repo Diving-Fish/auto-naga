@@ -10,6 +10,10 @@ import axios from "axios";
 import express from "express";
 import readline from "readline-sync";
 import fs from "fs";
+import { timeout } from "puppeteer";
+import { randomBytes } from "crypto";
+import { ImapFlow } from "imapflow";
+import { simpleParser } from "mailparser";
 
 
 function delay(time) {
@@ -23,6 +27,7 @@ var global = {
     first_majsoul_haihu: true,
     nagaUsers: new NagaUserGroup(),
     contextIndex: 0,
+    simple_pages: {},
     server: new WebSocketServer({port: 3166})
 };
 
@@ -99,6 +104,7 @@ const naga_request = (url, method, args, nagaUser) => {
             cookie_str += `${cookie.name}=${cookie.value}; `
         }
         cookie_str = cookie_str.slice(0, cookie_str.length - 2);
+        console.log(cookie_str)
         const axios_body = {
             url: url,
             method: method,
@@ -106,11 +112,18 @@ const naga_request = (url, method, args, nagaUser) => {
             ...args
         }
         axios_body.headers = axios_body.headers || {};
-        axios_body.headers['cookie'] = cookie_str;
+        axios_body.headers['Cookie'] = cookie_str;
+        // axios_body.proxy = {
+        //     protocol: 'http',
+        //     host: '127.0.0.1',
+        //     port: '10809'
+        // }
+        console.log(axios_body.headers)
         axios(axios_body).then(resp => {
             resolve(resp);
         }).catch(err => {
-            nagaUser.login = false;
+            console.log(err.data)
+            // nagaUser.login = false;
             reject(err);
         })
     });
@@ -134,6 +147,11 @@ global.app.get('/order_report_list', async (req, res) => {
     let promiseArray = [];
     for (const nagaUser of global.nagaUsers.users) {
         if (!nagaUser.login) continue;
+        let cookie_str = "";
+        for (const cookie of nagaUser.cookies) {
+            cookie_str += `${cookie.name}=${cookie.value}; `
+        }
+        cookie_str = cookie_str.slice(0, cookie_str.length - 2);
         promiseArray.push(naga_request('/naga_report/api/order_report_list/', 'get', {
             params: {
                 year: new Date().getFullYear(),
@@ -147,8 +165,10 @@ global.app.get('/order_report_list', async (req, res) => {
         "report": [],
         "order": []
     }
+    // console.log(values)
     for (const result of values) {
         if (result.status === "fulfilled") {
+            // console.log(result.value.data)
             resp.report.push(...result.value.data.report);
             resp.order.push(...result.value.data.order);
         }
@@ -221,13 +241,98 @@ global.app.post('/order', async (req, res) => {
         })
     } catch (err) {
         console.log(err);
-        res.send({"status": 400 });
+        res.send({"status": 400, "message": err.toString() });
     }
 })
+
+global.app.post('/simple_login', async (req, res) => {
+    const username = req.body.username;
+    const password = req.body.password;
+    const randomToken = randomBytes(32).toString('hex');
+    console.log(`Simple login, username: ${username}, password: ${password}, token: ${randomToken}`)
+    simple_login_majsoul(username, password, randomToken);
+    res.send({ "status": 200, "token": randomToken });
+})
+
+global.app.get('/simple_login', async (req, res) => {
+    const randomToken = req.query.token;
+    try {
+        await save_screenshot(randomToken);
+        res.sendFile(`${randomToken}.png`, { root: './screenshots/' });
+    } catch (e) {
+        res.send({ "status": 404, "message": "error" });
+    }
+})
+
+global.app.get('/shutdown', async (req, res) => {
+    if (req.query.token === loginContext.shutdown_token) {
+        res.send({ "status": 200, "message": "shutdown" });
+        exit(0);
+    }
+    else {
+        res.send({ "status": 400, "message": "error" });
+    }
+});
 
 global.app.listen(3165, () => {
 
 });
+
+async function save_screenshot(randomToken) {
+    const file = `screenshots/${randomToken}.png`;
+    if (global.simple_pages[randomToken]) {
+        await global.simple_pages[randomToken].screenshot({
+            path: file
+        });
+    }
+}
+
+async function simple_login_majsoul(username, password, randomToken)
+{
+    if (global.browser)
+    {
+        const page_simple_login = await global.browser.newPage();
+        await page_simple_login.goto("https://game.maj-soul.com/1/");
+        console.log(`Try to login majsoul with username ${username} and password ${password}`)
+        global.simple_pages[randomToken] = page_simple_login;
+        await delay(3000);
+        let timeout = 0;
+        while (timeout < 60) {
+            await delay(1000);
+            timeout++;
+            await page_simple_login.mouse.click(520, 210);
+            const input = await page_simple_login.$("input")
+            if (input) {
+                console.log(`Simple login, inputing username and password`)
+                await delay(500);
+                await input.type(username)
+                await page_simple_login.mouse.click(520, 255);
+                await delay(500);
+                const input_pw = await page_simple_login.$("input")
+                await delay(500);
+                await input_pw.type(password)
+
+                const file = `${new Date().getTime()}.png`;
+                await page_simple_login.screenshot({
+                    path: file
+                });
+                break;
+            }
+        }
+        await page_simple_login.mouse.click(520, 360);
+
+        while (timeout < 180)
+        {
+            await delay(1000);
+            timeout++;
+            await page_simple_login.mouse.click(748, 165);
+        }
+
+        page_simple_login.close();
+        console.log(`Simple login timeout, close this page`)
+    }
+    delete global.simple_pages[randomToken];
+}
 
 async function parse_majsoul_url(url) {
     if (global.browser && global.majsoul_free) {
@@ -248,12 +353,15 @@ async function parse_majsoul_url(url) {
             var timeout = 0;
             await delay(3000);
 
+            console.log(`Try to parse majsoul url ${url}`)
+
             while (timeout < 60 && global.first_majsoul_haihu) {
                 await delay(1000);
                 timeout++;
                 await page_majsoul.mouse.click(520, 210);
                 const input = await page_majsoul.$("input")
                 if (input) {
+                    console.log(`Login first time, inputing username and password`)
                     await delay(500);
                     await input.type(loginContext.majsoul_user)
                     await page_majsoul.mouse.click(520, 255);
@@ -267,11 +375,22 @@ async function parse_majsoul_url(url) {
             }
             await page_majsoul.mouse.click(520, 360);
 
+            console.log(`Login OK`)
+
             global.majsoul_data = false;
 
-            while (!global.majsoul_data && timeout < 60) {
+            while (!global.majsoul_data && timeout < 180) {
                 await delay(1000);
                 timeout++;
+                if (timeout % 3 == 0)
+                {
+                    console.log("timeout " + timeout)
+                    const file = `${new Date().getTime()}.png`;
+                    await page_majsoul.screenshot({
+                        path: file
+                    });
+                    // console.log(`Screenshot has been saved to ${file}`)
+                }
                 global.majsoul_data = await page_majsoul.evaluate(async () => {
                     return await new Promise((resolve, reject) => {
                         if (this['GameMgr'] === undefined || GameMgr.Inst.record_uuid === '') {
@@ -287,27 +406,39 @@ async function parse_majsoul_url(url) {
                                 var mjsact = net.MessageWrapper.decodeMessage(record.data).actions;
                                 mjsact.forEach(e => {
                                     if (e.result.length !== 0) mjslog.push(net.MessageWrapper.decodeMessage(e.result));
-                                    mjslog.forEach(e => { e.cname = e.constructor.name }); // 传回来的 object 没有 prototype 信息
-                                    resolve({
-                                        record: record,
-                                        mjslog: mjslog,
-                                        matchmode_map_: cfg.desktop.matchmode.map_,
-                                        fan_map_: cfg.fan.fan.map_
-                                    });
                                 })
-                            });
+                                mjslog.forEach(e => { e.cname = e.constructor.name }); // 传回来的 object 没有 prototype 信息
+                                const value = {
+                                    record: record,
+                                    mjslog: mjslog,
+                                    matchmode_map_: cfg.desktop.matchmode.map_,
+                                    fan_map_: cfg.fan.fan.map_
+                                };
+                                resolve(value)
+                            }
+                        );
                     })
                 })
+                if (global.majsoul_data) 
+                {
+                    console.log(`Analyzed`)
+                }
             }
 
             global.majsoul_free = true;
-            await page_majsoul.close();
-            if (timeout === 60) {
+            if (timeout >= 180) {
+                console.log(`Timeout, please try again`)
+                const file = `/var/www/nagalog/newest.png`;
+                await page_majsoul.screenshot({
+                    path: file
+                });
+                console.log(`Screenshot has been saved to ${file}`)
                 return {
                     status: 400,
                     message: "timeout"
                 }
             }
+            await page_majsoul.close();
             return {
                 status: 200,
                 message: binaryToUrls(global.majsoul_data)
@@ -363,7 +494,25 @@ async function create_naga_user_context(nagaUser, webSocket) {
             } catch (e) {
                 throw new Error("Incorrect username or password");
             }
-            if (webSocket) {
+            if (nagaUser.mail_imap != null) {
+                await delay(5000); // wait for email to arrive
+                const client = new ImapFlow(Object.assign({logger: false}, nagaUser.mail_imap));
+                await client.connect()
+                let lock = await client.getMailboxLock('INBOX');
+                let message = await client.fetchOne('*', { source: true });
+                let parsed = await simpleParser(message.source);
+                const text = parsed.text.replace(/\n/g, '');
+                lock.release();
+                await client.logout();
+                const regex = /あなたのアカウントへログインするには、以下の確認コードを入力してください。(\d+)/
+                const match = text.match(regex);
+                if (match && match.length >= 2) {
+                    console.log("已从邮箱获取验证码，正在登录...")
+                    code = match[1];
+                } else {
+                    code = readline.question("请查收您邮箱中的验证码，并输入：")
+                }
+            } else if (webSocket) {
                 webSocket.send("request verify2")
                 code = await webSocket.awaitForMessage(180);
             } else {
@@ -404,7 +553,7 @@ async function create_naga_user_context(nagaUser, webSocket) {
 }
 
 (async () => {
-    global.browser = await puppeteer.launch();
+    global.browser = await puppeteer.launch({headless: "new", args: ['--no-sandbox', '--proxy-server=http://localhost:10809']});
     for (const user of global.nagaUsers.users) {
         await create_naga_user_context(user, null);
     }

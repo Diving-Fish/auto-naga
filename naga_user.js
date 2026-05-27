@@ -1,10 +1,11 @@
 import fs from "fs";
 
 export class NagaUser {
-    constructor(username, password, secret_md5, cookies) {
+    constructor(username, password, secret_md5, cookies, mail_imap) {
         this.username = username;
         this.password = password;
         this.secret_md5 = secret_md5;
+        this.mail_imap = mail_imap || null;
         this.webPage = null;
         this.cookies = cookies || [];
         this.login = false;
@@ -18,7 +19,7 @@ export class NagaUserGroup {
             const value = fs.readFileSync("./naga_user.json").toString();
             const jsonData = JSON.parse(value);
             for (const value of jsonData) {
-                this.users.push(new NagaUser(value.username, value.password, value.secret_md5, value.cookies));
+                this.users.push(new NagaUser(value.username, value.password, value.secret_md5, value.cookies, value.mail_imap));
             }
         }
         else {
@@ -40,7 +41,8 @@ export class NagaUserGroup {
                 username: user.username,
                 password: user.password,
                 secret_md5: user.secret_md5,
-                cookies: user.cookies
+                cookies: user.cookies,
+                mail_imap: user.mail_imap
             });
         }
         fs.writeFileSync("./naga_user.json", JSON.stringify(jsonData));
