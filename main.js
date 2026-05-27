@@ -14,6 +14,7 @@ import { timeout } from "puppeteer";
 import { randomBytes } from "crypto";
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
+import path from "path";
 
 
 function delay(time) {
@@ -292,12 +293,16 @@ async function simple_login_majsoul(username, password, randomToken)
     if (global.browser)
     {
         const page_simple_login = await global.browser.newPage();
+        await page_simple_login.evaluateOnNewDocument(() => {
+            localStorage.clear();
+            sessionStorage.clear();
+        });
         await page_simple_login.goto("https://game.maj-soul.com/1/");
         console.log(`Try to login majsoul with username ${username} and password ${password}`)
         global.simple_pages[randomToken] = page_simple_login;
         await delay(3000);
         let timeout = 0;
-        while (timeout < 60) {
+        while (timeout < 180) {
             await delay(1000);
             timeout++;
             await page_simple_login.mouse.click(520, 210);
@@ -321,7 +326,7 @@ async function simple_login_majsoul(username, password, randomToken)
         }
         await page_simple_login.mouse.click(520, 360);
 
-        while (timeout < 180)
+        while (timeout < 300)
         {
             await delay(1000);
             timeout++;
@@ -384,11 +389,11 @@ async function parse_majsoul_url(url) {
                 timeout++;
                 if (timeout % 3 == 0)
                 {
-                    console.log("timeout " + timeout)
-                    const file = `${new Date().getTime()}.png`;
-                    await page_majsoul.screenshot({
-                        path: file
-                    });
+                    // console.log("timeout " + timeout)
+                    // const file = `${new Date().getTime()}.png`;
+                    // await page_majsoul.screenshot({
+                    //     path: file
+                    // });
                     // console.log(`Screenshot has been saved to ${file}`)
                 }
                 global.majsoul_data = await page_majsoul.evaluate(async () => {
@@ -553,7 +558,8 @@ async function create_naga_user_context(nagaUser, webSocket) {
 }
 
 (async () => {
-    global.browser = await puppeteer.launch({headless: "new", args: ['--no-sandbox', '--proxy-server=http://localhost:10809']});
+    const cachePath = path.join('.', 'puppeteer_cache');
+    global.browser = await puppeteer.launch({headless: "new", args: ['--no-sandbox', '--proxy-server=http://localhost:10809', '--disk-cache-size=104857600'], userDataDir: cachePath});
     for (const user of global.nagaUsers.users) {
         await create_naga_user_context(user, null);
     }
