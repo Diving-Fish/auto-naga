@@ -17,6 +17,7 @@
     "js-md5": "^0.8.3",
     "mailparser": "^3.9.1",
     "moment-timezone": "^0.5.46",
+    "protobufjs": "^8.6.3",
     "puppeteer": "^23.7.0",
     "readline-sync": "^1.4.10",
     "ws": "^8.18.0"

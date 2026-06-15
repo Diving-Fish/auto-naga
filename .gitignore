@@ -3,3 +3,5 @@ config.json
 naga_user.json
 .idea
 puppeteer_cache
+screenshots
+*.png

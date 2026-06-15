@@ -4,6 +4,7 @@ import {WebSocket, WebSocketServer} from "ws";
 import {exit} from "process";
 import moment from "moment-timezone";
 import { binaryToUrls } from "./paipu_transfer.js";
+import { loginConnection, fetchPaipuData } from "./majsoul_client.js";
 import FormData from "form-data";
 import md5 from "js-md5";
 import axios from "axios";
@@ -26,6 +27,7 @@ function delay(time) {
 var global = {
     majsoul_free: true,
     first_majsoul_haihu: true,
+    majsoulConn: null,
     nagaUsers: new NagaUserGroup(),
     contextIndex: 0,
     simple_pages: {},
@@ -339,128 +341,56 @@ async function simple_login_majsoul(username, password, randomToken)
     delete global.simple_pages[randomToken];
 }
 
-async function parse_majsoul_url(url) {
-    if (global.browser && global.majsoul_free) {
-        const page_majsoul = await global.browser.newPage();
-        try {
-            global.majsoul_free = false;
-
-            await page_majsoul.goto(url);
-
-            if (!page_majsoul.url().startsWith("https://game.maj-soul.com/1/")) {
-                global.majsoul_free = true;
-                await page_majsoul.close();
-                return {
-                    status: 400,
-                    message: "URL is not correct"
-                }
-            }
-            var timeout = 0;
-            await delay(3000);
-
-            console.log(`Try to parse majsoul url ${url}`)
-
-            while (timeout < 60 && global.first_majsoul_haihu) {
-                await delay(1000);
-                timeout++;
-                await page_majsoul.mouse.click(520, 210);
-                const input = await page_majsoul.$("input")
-                if (input) {
-                    console.log(`Login first time, inputing username and password`)
-                    await delay(500);
-                    await input.type(loginContext.majsoul_user)
-                    await page_majsoul.mouse.click(520, 255);
-                    await delay(500);
-                    const input_pw = await page_majsoul.$("input")
-                    await delay(500);
-                    await input_pw.type(loginContext.majsoul_password)
-                    global.first_majsoul_haihu = false;
-                    break;
-                }
-            }
-            await page_majsoul.mouse.click(520, 360);
-
-            console.log(`Login OK`)
-
-            global.majsoul_data = false;
-
-            while (!global.majsoul_data && timeout < 180) {
-                await delay(1000);
-                timeout++;
-                if (timeout % 3 == 0)
-                {
-                    // console.log("timeout " + timeout)
-                    // const file = `${new Date().getTime()}.png`;
-                    // await page_majsoul.screenshot({
-                    //     path: file
-                    // });
-                    // console.log(`Screenshot has been saved to ${file}`)
-                }
-                global.majsoul_data = await page_majsoul.evaluate(async () => {
-                    return await new Promise((resolve, reject) => {
-                        if (this['GameMgr'] === undefined || GameMgr.Inst.record_uuid === '') {
-                            resolve(false);
-                            return;
-                        }
-                        app.NetAgent.sendReq2Lobby(
-                            "Lobby",
-                            "fetchGameRecord",
-                            { game_uuid: GameMgr.Inst.record_uuid, client_version_string: GameMgr.Inst.getClientVersion() },
-                            (i, record) => {
-                                var mjslog = [];
-                                var mjsact = net.MessageWrapper.decodeMessage(record.data).actions;
-                                mjsact.forEach(e => {
-                                    if (e.result.length !== 0) mjslog.push(net.MessageWrapper.decodeMessage(e.result));
-                                })
-                                mjslog.forEach(e => { e.cname = e.constructor.name }); // 传回来的 object 没有 prototype 信息
-                                const value = {
-                                    record: record,
-                                    mjslog: mjslog,
-                                    matchmode_map_: cfg.desktop.matchmode.map_,
-                                    fan_map_: cfg.fan.fan.map_
-                                };
-                                resolve(value)
-                            }
-                        );
-                    })
-                })
-                if (global.majsoul_data) 
-                {
-                    console.log(`Analyzed`)
-                }
-            }
-
-            global.majsoul_free = true;
-            if (timeout >= 180) {
-                console.log(`Timeout, please try again`)
-                const file = `/var/www/nagalog/newest.png`;
-                await page_majsoul.screenshot({
-                    path: file
-                });
-                console.log(`Screenshot has been saved to ${file}`)
-                return {
-                    status: 400,
-                    message: "timeout"
-                }
-            }
-            await page_majsoul.close();
-            return {
-                status: 200,
-                message: binaryToUrls(global.majsoul_data)
-            }
-        } catch (e) {
-            console.log(e)
-            global.majsoul_free = true;
-            await page_majsoul.close();
-            return {
-                status: 400,
-                message: e
-            }
-        }
+// Reuse a single logged-in gateway connection across requests; re-login on demand if it died.
+async function getMajsoulConnection() {
+    if (global.majsoulConn && global.majsoulConn.ws && global.majsoulConn.ws.readyState === WebSocket.OPEN) {
+        return global.majsoulConn;
     }
-    return {
-        status: 400,
-        message: "雀魂牌谱解析服务当前正在访问中，请稍后再试"
+    if (global.majsoulConn) {
+        try { global.majsoulConn.close(); } catch (e) { /* ignore */ }
+        global.majsoulConn = null;
+    }
+    const { conn, account_id } = await loginConnection(loginContext.majsoul_user, loginContext.majsoul_password);
+    console.log(`Logged in to majsoul gateway, account_id: ${account_id}`);
+    global.majsoulConn = conn;
+    return conn;
+}
+
+async function parse_majsoul_url(url) {
+    // url is the share string, e.g. ".../?paipu=<uuid>_<token>"; extract the paipu value.
+    let paipu;
+    try {
+        paipu = new URL(url).searchParams.get("paipu");
+    } catch (e) {
+        paipu = null;
+    }
+    if (!paipu) {
+        // also accept a bare uuid / "uuid_token" passed directly
+        const m = String(url).match(/paipu=([^&]+)/);
+        paipu = m ? decodeURIComponent(m[1]) : String(url);
+    }
+    if (!paipu) {
+        return { status: 400, message: "URL is not correct" };
+    }
+
+    try {
+        const conn = await getMajsoulConnection();
+        const majsoul_data = await fetchPaipuData(conn, paipu);
+        return {
+            status: 200,
+            message: binaryToUrls(majsoul_data)
+        };
+    } catch (e) {
+        console.log(e);
+        // drop the (possibly broken) connection so the next request re-logs-in
+        if (global.majsoulConn) {
+            try { global.majsoulConn.close(); } catch (err) { /* ignore */ }
+            global.majsoulConn = null;
+        }
+        return {
+            status: 400,
+            message: e.toString()
+        };
     }
 }
 
