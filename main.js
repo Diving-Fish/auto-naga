@@ -24,6 +24,13 @@ function delay(time) {
     });
 }
 
+function makeLogger(prefix) {
+    return (...args) => {
+        const ts = moment().format("YYYY-MM-DD HH:mm:ss");
+        console.log(`[${ts}] [${prefix}]`, ...args);
+    };
+}
+
 var global = {
     majsoul_free: true,
     first_majsoul_haihu: true,
@@ -102,12 +109,13 @@ const loginContext = JSON.parse(fs.readFileSync("config.json").toString())
 
 const naga_request = (url, method, args, nagaUser) => {
     return new Promise((resolve, reject) => {
+        const log = makeLogger('naga_request');
         let cookie_str = "";
         for (const cookie of nagaUser.cookies) {
             cookie_str += `${cookie.name}=${cookie.value}; `
         }
         cookie_str = cookie_str.slice(0, cookie_str.length - 2);
-        console.log(cookie_str)
+        log(cookie_str)
         const axios_body = {
             url: url,
             method: method,
@@ -121,11 +129,11 @@ const naga_request = (url, method, args, nagaUser) => {
         //     host: '127.0.0.1',
         //     port: '10809'
         // }
-        console.log(axios_body.headers)
+        log(axios_body.headers)
         axios(axios_body).then(resp => {
             resolve(resp);
         }).catch(err => {
-            console.log(err.data)
+            log(err.data)
             // nagaUser.login = false;
             reject(err);
         })
@@ -202,6 +210,7 @@ global.app.post('/convert_majsoul', async (req, res) => {
 })
 
 global.app.post('/order', async (req, res) => {
+    const logger = makeLogger('/order');
     const secret = req.body.secret;
     const player_types = req.body.player_types;
     const nagaUser = global.nagaUsers.getBySecret(md5(secret));
@@ -243,26 +252,28 @@ global.app.post('/order', async (req, res) => {
             ...resp.data
         })
     } catch (err) {
-        console.log(err);
+        logger(err);
         res.send({"status": 400, "message": err.toString() });
     }
 })
 
 global.app.post('/simple_login', async (req, res) => {
+    const log = makeLogger('/simple_login');
     const username = req.body.username;
     const password = req.body.password;
     const randomToken = randomBytes(32).toString('hex');
-    console.log(`Simple login, username: ${username}, password: ${password}, token: ${randomToken}`)
+    log(`Simple login, username: ${username}, password: ${password}, token: ${randomToken}`)
     simple_login_majsoul(username, password, randomToken);
     res.send({ "status": 200, "token": randomToken });
 })
 
 global.app.get('/simple_login', async (req, res) => {
     const randomToken = req.query.token;
+    const log = makeLogger('/simple_login');
     try {
-        await save_screenshot(randomToken);
         res.sendFile(`${randomToken}.png`, { root: './screenshots/' });
     } catch (e) {
+        log(e);
         res.send({ "status": 404, "message": "error" });
     }
 })
@@ -292,6 +303,7 @@ async function save_screenshot(randomToken) {
 
 async function simple_login_majsoul(username, password, randomToken)
 {
+    const log = makeLogger('simple_login_majsoul');
     if (global.browser)
     {
         const page_simple_login = await global.browser.newPage();
@@ -300,49 +312,52 @@ async function simple_login_majsoul(username, password, randomToken)
             sessionStorage.clear();
         });
         await page_simple_login.goto("https://game.maj-soul.com/1/");
-        console.log(`Try to login majsoul with username ${username} and password ${password}`)
+        log(`Try to login majsoul with username ${username} and password ${password}`)
         global.simple_pages[randomToken] = page_simple_login;
         await delay(3000);
-        let timeout = 0;
-        while (timeout < 180) {
+        const startTime = Date.now();
+        const elapsed = () => (Date.now() - startTime) / 1000;
+        while (elapsed() < 180) {
             await delay(1000);
-            timeout++;
+            await save_screenshot(randomToken);
             await page_simple_login.mouse.click(520, 210);
             const input = await page_simple_login.$("input")
             if (input) {
-                console.log(`Simple login, inputing username and password`)
+                log(`Simple login, inputing username and password`)
                 await delay(500);
                 await input.type(username)
-                await page_simple_login.mouse.click(520, 255);
-                await delay(500);
-                const input_pw = await page_simple_login.$("input")
-                await delay(500);
+                let input_pw = null;
+                while (input_pw === null && elapsed() < 180) {
+                    await page_simple_login.mouse.click(520, 255);
+                    await delay(500);
+                    input_pw = await page_simple_login.$("input")
+                    await delay(500);
+                }
                 await input_pw.type(password)
-
-                const file = `${new Date().getTime()}.png`;
-                await page_simple_login.screenshot({
-                    path: file
-                });
+                await save_screenshot(randomToken);
                 break;
             }
         }
         await page_simple_login.mouse.click(520, 360);
 
-        while (timeout < 300)
+        while (elapsed() < 300)
         {
-            await delay(1000);
-            timeout++;
+            await delay(3000);
+            await save_screenshot(randomToken);
             await page_simple_login.mouse.click(748, 165);
         }
 
+        // save before close
+        await save_screenshot(randomToken); 
         page_simple_login.close();
-        console.log(`Simple login timeout, close this page`)
+        log(`Simple login timeout, close this page`)
     }
     delete global.simple_pages[randomToken];
 }
 
 // Reuse a single logged-in gateway connection across requests; re-login on demand if it died.
 async function getMajsoulConnection() {
+    const log = makeLogger('getMajsoulConnection');
     if (global.majsoulConn && global.majsoulConn.ws && global.majsoulConn.ws.readyState === WebSocket.OPEN) {
         return global.majsoulConn;
     }
@@ -351,12 +366,13 @@ async function getMajsoulConnection() {
         global.majsoulConn = null;
     }
     const { conn, account_id } = await loginConnection(loginContext.majsoul_user, loginContext.majsoul_password);
-    console.log(`Logged in to majsoul gateway, account_id: ${account_id}`);
+    log(`Logged in to majsoul gateway, account_id: ${account_id}`);
     global.majsoulConn = conn;
     return conn;
 }
 
 async function parse_majsoul_url(url) {
+    const log = makeLogger('parse_majsoul_url');
     // url is the share string, e.g. ".../?paipu=<uuid>_<token>"; extract the paipu value.
     let paipu;
     try {
@@ -376,12 +392,13 @@ async function parse_majsoul_url(url) {
     try {
         const conn = await getMajsoulConnection();
         const majsoul_data = await fetchPaipuData(conn, paipu);
+        log(`Fetched majsoul data for paipu ${paipu}`);
         return {
             status: 200,
             message: binaryToUrls(majsoul_data)
         };
     } catch (e) {
-        console.log(e);
+        log(e);
         // drop the (possibly broken) connection so the next request re-logs-in
         if (global.majsoulConn) {
             try { global.majsoulConn.close(); } catch (err) { /* ignore */ }
@@ -395,6 +412,7 @@ async function parse_majsoul_url(url) {
 }
 
 async function create_naga_user_context(nagaUser, webSocket) {
+    const log = makeLogger('create_naga_user_context');
     let newContext = global.browser.defaultBrowserContext();
     if (global.contextIndex > 0) {
         newContext = await global.browser.createIncognitoBrowserContext();
@@ -422,7 +440,7 @@ async function create_naga_user_context(nagaUser, webSocket) {
 
         // 2-step verification
         if (!page_naga.url().startsWith("https://naga.dmv.nico/")) {
-            console.log("waiting for 2-step verification...")
+            log("waiting for 2-step verification...")
             let code = "";
             try {
                 await page_naga.type('#oneTimePw', code)
@@ -442,7 +460,7 @@ async function create_naga_user_context(nagaUser, webSocket) {
                 const regex = /あなたのアカウントへログインするには、以下の確認コードを入力してください。(\d+)/
                 const match = text.match(regex);
                 if (match && match.length >= 2) {
-                    console.log("已从邮箱获取验证码，正在登录...")
+                    log("已从邮箱获取验证码，正在登录...")
                     code = match[1];
                 } else {
                     code = readline.question("请查收您邮箱中的验证码，并输入：")
@@ -459,7 +477,7 @@ async function create_naga_user_context(nagaUser, webSocket) {
         }
 
         if (page_naga.url().startsWith("https://naga.dmv.nico/")) {
-            console.log(`NAGA USER ${nagaUser.username} 已登录`)
+            log(`NAGA USER ${nagaUser.username} 已登录`)
             nagaUser.cookies = await page_naga.cookies()
             nagaUser.login = true;
             if (global.nagaUsers.getByUsername(nagaUser.username) === undefined) {
@@ -474,8 +492,9 @@ async function create_naga_user_context(nagaUser, webSocket) {
             webSocket.close()
         }
     } catch (e) {
-        console.log(`NAGA USER ${nagaUser.username} 登录失败`)
-        console.log(e)
+        const log = makeLogger('naga_login');
+        log(`NAGA USER ${nagaUser.username} 登录失败`)
+        log(e)
         if (webSocket) {
             webSocket.send("failed")
             webSocket.send(e.toString())
