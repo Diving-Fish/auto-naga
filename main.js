@@ -9,13 +9,11 @@ import FormData from "form-data";
 import md5 from "js-md5";
 import axios from "axios";
 import express from "express";
-import readline from "readline-sync";
 import fs from "fs";
 import { timeout } from "puppeteer";
 import { randomBytes } from "crypto";
-import { ImapFlow } from "imapflow";
-import { simpleParser } from "mailparser";
 import path from "path";
+import * as nagaLogin from "./naga_login.js";
 
 
 function delay(time) {
@@ -31,12 +29,17 @@ function makeLogger(prefix) {
     };
 }
 
+// A stray rejection (a closed puppeteer page, a dropped socket) used to take the
+// whole service down and with it any in-flight login session.
+process.on('unhandledRejection', (reason) => {
+    makeLogger('unhandledRejection')(reason);
+});
+
 var global = {
     majsoul_free: true,
     first_majsoul_haihu: true,
     majsoulConn: null,
     nagaUsers: new NagaUserGroup(),
-    contextIndex: 0,
     simple_pages: {},
     server: new WebSocketServer({port: 3166})
 };
@@ -73,7 +76,7 @@ global.server.on('connection', async function connection(ws, request) {
         ws.send("request secret")
         const secret = await ws.awaitForMessage();
         const nagaUser = new NagaUser(username, password, md5(secret));
-        await create_naga_user_context(nagaUser, ws);
+        await create_naga_user_context(nagaUser, ws).done;
     }
     else if (request.url === '/login')
     {
@@ -89,7 +92,7 @@ global.server.on('connection', async function connection(ws, request) {
             ws.close();
             return;
         }
-        await create_naga_user_context(user, ws);
+        await create_naga_user_context(user, ws).done;
     }
     else
     {
@@ -106,6 +109,54 @@ if (!fs.existsSync("config.json")) {
 }
 
 const loginContext = JSON.parse(fs.readFileSync("config.json").toString())
+
+const SESSION_COOKIE = "naga-report-session-id";
+
+function base_url() {
+    return (loginContext.public_base_url || 'http://localhost:3165').replace(/\/$/, '');
+}
+
+function session_expiry(nagaUser) {
+    const cookie = (nagaUser.cookies || []).find(c => c.name === SESSION_COOKIE);
+    if (!cookie || !(cookie.expires > 0)) return null;
+    return new Date(cookie.expires * 1000);
+}
+
+function days_until_expiry(nagaUser) {
+    const expiry = session_expiry(nagaUser);
+    if (expiry === null) return null;
+    return (expiry.getTime() - Date.now()) / 86400000;
+}
+
+// NAGA rolls the session cookie forward on some responses; keep the stored copy
+// in sync so the watchdog sees the real expiry (and so we re-login less often).
+function merge_set_cookie(nagaUser, setCookieHeaders) {
+    if (!setCookieHeaders || setCookieHeaders.length === 0) return false;
+    let changed = false;
+    for (const header of setCookieHeaders) {
+        const [pair, ...attrs] = header.split(';');
+        const index = pair.indexOf('=');
+        if (index < 0) continue;
+        const name = pair.slice(0, index).trim();
+        const value = pair.slice(index + 1).trim();
+        const expiresAttr = attrs.map(a => a.trim()).find(a => a.toLowerCase().startsWith('expires='));
+        const expires = expiresAttr ? new Date(expiresAttr.slice(8)).getTime() / 1000 : undefined;
+
+        const cookie = (nagaUser.cookies || []).find(c => c.name === name);
+        if (cookie) {
+            if (cookie.value !== value || (expires && cookie.expires !== expires)) {
+                cookie.value = value;
+                if (expires) cookie.expires = expires;
+                changed = true;
+            }
+        } else {
+            nagaUser.cookies.push({ name, value, domain: 'naga.dmv.nico', path: '/', expires: expires || -1 });
+            changed = true;
+        }
+    }
+    if (changed) global.nagaUsers.save();
+    return changed;
+}
 
 const naga_request = (url, method, args, nagaUser) => {
     return new Promise((resolve, reject) => {
@@ -131,6 +182,11 @@ const naga_request = (url, method, args, nagaUser) => {
         // }
         log(axios_body.headers)
         axios(axios_body).then(resp => {
+            merge_set_cookie(nagaUser, resp.headers['set-cookie']);
+            if (resp.data && resp.data.status === 401) {
+                log(`NAGA USER ${nagaUser.username} 会话已失效，需要重新人工登录`);
+                nagaUser.login = false;
+            }
             resolve(resp);
         }).catch(err => {
             log(err.data)
@@ -278,6 +334,195 @@ global.app.get('/simple_login', async (req, res) => {
     }
 })
 
+// Accepts cookies harvested from a real browser: an array of cookie objects, a
+// raw "a=b; c=d" header string, or {session_id, csrf_token}.
+function normalize_cookies(input) {
+    const mk = (name, value, extra = {}) => ({
+        name, value,
+        domain: extra.domain || 'naga.dmv.nico',
+        path: extra.path || '/',
+        expires: extra.expires ?? extra.expirationDate ?? -1
+    });
+    if (Array.isArray(input)) {
+        return input.filter(c => c && c.name).map(c => mk(c.name, c.value, c));
+    }
+    if (typeof input === 'string') {
+        return input.split(';').map(part => {
+            const index = part.indexOf('=');
+            if (index < 0) return null;
+            return mk(part.slice(0, index).trim(), part.slice(index + 1).trim());
+        }).filter(Boolean);
+    }
+    if (input && typeof input === 'object') {
+        const cookies = [];
+        if (input.session_id) cookies.push(mk(SESSION_COOKIE, input.session_id));
+        if (input.csrf_token) cookies.push(mk('csrftoken', input.csrf_token));
+        return cookies;
+    }
+    return [];
+}
+
+// Confirms the cookies actually authenticate before we store them.
+async function verify_cookies(nagaUser) {
+    const resp = await naga_request('/naga_report/api/order_report_list/', 'get', {
+        params: { year: new Date().getFullYear(), month: new Date().getMonth() + 1 }
+    }, nagaUser);
+    return !(resp.data && resp.data.status === 401);
+}
+
+global.app.get('/import_cookies/ui', async (req, res) => {
+    res.type('html').send(nagaLogin.renderImportUi());
+});
+
+global.app.post('/import_cookies', async (req, res) => {
+    const log = makeLogger('/import_cookies');
+    const nagaUser = global.nagaUsers.getBySecret(md5(req.body.secret || ''));
+    if (nagaUser === undefined) {
+        res.send({ "status": 400, "message": "secret error" });
+        return;
+    }
+    const cookies = normalize_cookies(req.body.cookies ?? req.body);
+    if (!cookies.some(c => c.name === SESSION_COOKIE)) {
+        res.send({ "status": 400, "message": `cookies must include ${SESSION_COOKIE}` });
+        return;
+    }
+    const previous = nagaUser.cookies;
+    nagaUser.cookies = cookies;
+    try {
+        if (!await verify_cookies(nagaUser)) {
+            nagaUser.cookies = previous;
+            res.send({ "status": 401, "message": "cookie 无效或已过期，请在浏览器中重新登录后再导入" });
+            return;
+        }
+    } catch (e) {
+        nagaUser.cookies = previous;
+        res.send({ "status": 400, "message": e.toString() });
+        return;
+    }
+    nagaUser.login = true;
+    global.nagaUsers.save();
+    const expiry = session_expiry(nagaUser);
+    log(`NAGA USER ${nagaUser.username} 已通过导入 cookie 登录`);
+    res.send({
+        "status": 200,
+        "username": nagaUser.username,
+        "expires_at": expiry?.toISOString() || null,
+        "days_left": days_until_expiry(nagaUser)
+    });
+});
+
+// --- human-in-the-loop NAGA login (Cloudflare Turnstile on the niconico page) ---
+
+function resolve_login_session(req, res) {
+    const token = req.body?.token || req.query?.token;
+    const session = nagaLogin.getSession(token);
+    if (session === undefined) {
+        res.status(404).send({ "status": 404, "message": "login session not found or expired" });
+        return null;
+    }
+    return session;
+}
+
+global.app.post('/naga_login', async (req, res) => {
+    const log = makeLogger('/naga_login');
+    const nagaUser = global.nagaUsers.getBySecret(md5(req.body.secret || ''));
+    if (nagaUser === undefined) {
+        res.send({ "status": 400, "message": "secret error" });
+        return;
+    }
+    const session = create_naga_user_context(nagaUser, null);
+    log(`已为 ${nagaUser.username} 创建人工登录会话`);
+    res.send({
+        "status": 200,
+        "token": session.token,
+        "url": nagaLogin.relayUrl(base_url(), session.token)
+    });
+});
+
+global.app.get('/naga_login/ui', async (req, res) => {
+    const session = nagaLogin.getSession(req.query.token);
+    if (session === undefined) {
+        // Relay tokens die with the process; send stale links somewhere useful
+        // instead of a bare JSON 404.
+        res.status(404).type('html').send(`<!doctype html><meta charset="utf-8">
+<title>登录会话已失效</title>
+<body style="font-family:system-ui,sans-serif;background:#1c1c1e;color:#eee;padding:24px">
+<h1 style="font-size:18px">登录会话已失效</h1>
+<p style="color:#ccc;font-size:14px;line-height:1.8">中继链接里的 token 在服务重启后就失效了。<br>
+服务器 IP 上的 Cloudflare 验证本来也过不了，请改用导入 cookie：</p>
+<p><a href="/import_cookies/ui" style="color:#0a84ff;font-size:16px">前往导入 Cookie →</a></p>
+</body>`);
+        return;
+    }
+    res.type('html').send(nagaLogin.renderUi(session.token));
+});
+
+global.app.get('/naga_login/screenshot', async (req, res) => {
+    const session = resolve_login_session(req, res);
+    if (!session) return;
+    try {
+        const buffer = await nagaLogin.screenshot(session);
+        if (!buffer) {
+            res.status(404).send({ "status": 404, "message": "page is closed" });
+            return;
+        }
+        res.set('Cache-Control', 'no-store').type('png').send(buffer);
+    } catch (e) {
+        res.status(500).send({ "status": 500, "message": e.toString() });
+    }
+});
+
+global.app.get('/naga_login/status', async (req, res) => {
+    const session = resolve_login_session(req, res);
+    if (!session) return;
+    res.send({ "status": 200, "state": session.state, "message": session.message });
+});
+
+global.app.post('/naga_login/click', async (req, res) => {
+    const session = resolve_login_session(req, res);
+    if (!session) return;
+    try {
+        await nagaLogin.relayClick(session, Number(req.body.x), Number(req.body.y));
+        res.send({ "status": 200 });
+    } catch (e) {
+        res.send({ "status": 400, "message": e.toString() });
+    }
+});
+
+global.app.post('/naga_login/type', async (req, res) => {
+    const session = resolve_login_session(req, res);
+    if (!session) return;
+    try {
+        await nagaLogin.relayType(session, String(req.body.text || ''));
+        res.send({ "status": 200 });
+    } catch (e) {
+        res.send({ "status": 400, "message": e.toString() });
+    }
+});
+
+global.app.post('/naga_login/key', async (req, res) => {
+    const session = resolve_login_session(req, res);
+    if (!session) return;
+    try {
+        await nagaLogin.relayKey(session, String(req.body.key || 'Enter'));
+        res.send({ "status": 200 });
+    } catch (e) {
+        res.send({ "status": 400, "message": e.toString() });
+    }
+});
+
+global.app.get('/session_status', async (req, res) => {
+    res.send({
+        "status": 200,
+        "users": global.nagaUsers.users.map(user => ({
+            "username": user.username,
+            "login": user.login,
+            "expires_at": session_expiry(user)?.toISOString() || null,
+            "days_left": days_until_expiry(user)
+        }))
+    });
+});
+
 global.app.get('/shutdown', async (req, res) => {
     if (req.query.token === loginContext.shutdown_token) {
         res.send({ "status": 200, "message": "shutdown" });
@@ -411,105 +656,100 @@ async function parse_majsoul_url(url) {
     }
 }
 
-async function create_naga_user_context(nagaUser, webSocket) {
-    const log = makeLogger('create_naga_user_context');
-    let newContext = global.browser.defaultBrowserContext();
-    if (global.contextIndex > 0) {
-        newContext = await global.browser.createIncognitoBrowserContext();
+// The niconico login page is now protected by Cloudflare Turnstile, so this can
+// no longer run unattended: it opens the page, fills the credentials, and then
+// hands a relay URL to a human who ticks the checkbox and submits the form.
+// Returns the login session -- await `session.done` to wait for the outcome.
+function create_naga_user_context(nagaUser, webSocket) {
+    const log = makeLogger('naga_login');
+    const session = nagaLogin.startLogin(global.browser, nagaUser, {
+        log,
+        webSocket,
+        onSaved: (user) => {
+            if (global.nagaUsers.getByUsername(user.username) === undefined) {
+                global.nagaUsers.users.push(user);
+            }
+            global.nagaUsers.save();
+        }
+    });
+    log(`NAGA USER ${nagaUser.username} 需要人工完成 Cloudflare 验证，请打开：${nagaLogin.relayUrl(base_url(), session.token)}`);
+    if (webSocket) {
+        webSocket.send(JSON.stringify({
+            action: "human_login_required",
+            url: nagaLogin.relayUrl(base_url(), session.token)
+        }));
     }
+    return session;
+}
 
-    global.contextIndex++;
+// Poke the API so a rolling session cookie gets refreshed, and warn well before
+// the session expires -- re-logging in needs a human now, so it should never be
+// a surprise discovered by a failing /order.
+const WARN_DAYS = 3;
 
-    const page_naga = await newContext.newPage();
-    if (nagaUser.cookies) {
-        for (const cookie of nagaUser.cookies) {
-            await page_naga.setCookie(cookie);
+async function session_watchdog() {
+    const log = makeLogger('session_watchdog');
+    for (const user of global.nagaUsers.users) {
+        const days = days_until_expiry(user);
+        if (!user.login) {
+            log(`NAGA USER ${user.username} 未登录，请打开 ${base_url()}/import_cookies/ui 导入浏览器 cookie`);
+            continue;
         }
-    }
-
-    nagaUser.webPage = page_naga;
-
-    try {
-        await page_naga.goto('https://naga.dmv.nico/niconico/niconico_login/');
-
-        if (page_naga.url().startsWith("https://account.nicovideo.jp/login")) {
-            await page_naga.type('#input__mailtel', nagaUser.username)
-            await page_naga.type('#input__password', nagaUser.password)
-            await Promise.all([page_naga.click('#login__submit'), page_naga.waitForNavigation()])
+        try {
+            await naga_request('/naga_report/api/order_report_list/', 'get', {
+                params: { year: new Date().getFullYear(), month: new Date().getMonth() + 1 }
+            }, user);
+        } catch (e) {
+            log(`NAGA USER ${user.username} keepalive 请求失败: ${e.toString()}`);
         }
-
-        // 2-step verification
-        if (!page_naga.url().startsWith("https://naga.dmv.nico/")) {
-            log("waiting for 2-step verification...")
-            let code = "";
-            try {
-                await page_naga.type('#oneTimePw', code)
-            } catch (e) {
-                throw new Error("Incorrect username or password");
-            }
-            if (nagaUser.mail_imap != null) {
-                await delay(5000); // wait for email to arrive
-                const client = new ImapFlow(Object.assign({logger: false}, nagaUser.mail_imap));
-                await client.connect()
-                let lock = await client.getMailboxLock('INBOX');
-                let message = await client.fetchOne('*', { source: true });
-                let parsed = await simpleParser(message.source);
-                const text = parsed.text.replace(/\n/g, '');
-                lock.release();
-                await client.logout();
-                const regex = /あなたのアカウントへログインするには、以下の確認コードを入力してください。(\d+)/
-                const match = text.match(regex);
-                if (match && match.length >= 2) {
-                    log("已从邮箱获取验证码，正在登录...")
-                    code = match[1];
-                } else {
-                    code = readline.question("请查收您邮箱中的验证码，并输入：")
-                }
-            } else if (webSocket) {
-                webSocket.send("request verify2")
-                code = await webSocket.awaitForMessage(180);
-            } else {
-                code = readline.question("请查收您邮箱中的验证码，并输入：")
-            }
-            await page_naga.type('#oneTimePw', code)
-            const btn = await page_naga.$(".loginBtn")
-            await Promise.all([btn.click(), page_naga.waitForNavigation()])
+        const daysAfter = days_until_expiry(user);
+        if (daysAfter !== null && days !== null && daysAfter > days + 0.5) {
+            log(`NAGA USER ${user.username} 会话有效期已顺延至 ${session_expiry(user).toISOString()}`);
         }
-
-        if (page_naga.url().startsWith("https://naga.dmv.nico/")) {
-            log(`NAGA USER ${nagaUser.username} 已登录`)
-            nagaUser.cookies = await page_naga.cookies()
-            nagaUser.login = true;
-            if (global.nagaUsers.getByUsername(nagaUser.username) === undefined) {
-                global.nagaUsers.users.push(nagaUser)
-            }
-            global.nagaUsers.save()
-        } else {
-            throw new Error("NAGA login failed");
+        if (daysAfter !== null && daysAfter < WARN_DAYS) {
+            log(`⚠ NAGA USER ${user.username} 的会话将在 ${daysAfter.toFixed(1)} 天后过期，请尽快调用 POST /naga_login 重新登录`);
         }
-        if (webSocket) {
-            webSocket.send("ok")
-            webSocket.close()
-        }
-    } catch (e) {
-        const log = makeLogger('naga_login');
-        log(`NAGA USER ${nagaUser.username} 登录失败`)
-        log(e)
-        if (webSocket) {
-            webSocket.send("failed")
-            webSocket.send(e.toString())
-            webSocket.close()
-        }
-    } finally {
-        await page_naga.close();
-        if (newContext !== global.browser.defaultBrowserContext()) await newContext.close();
     }
 }
 
 (async () => {
+    const log = makeLogger('startup');
     const cachePath = path.join('.', 'puppeteer_cache');
-    global.browser = await puppeteer.launch({headless: "new", args: ['--no-sandbox', '--proxy-server=http://localhost:10809', '--disk-cache-size=104857600'], userDataDir: cachePath});
-    for (const user of global.nagaUsers.users) {
-        await create_naga_user_context(user, null);
+    // A hard crash leaves these behind and every later launch aborts with
+    // "Failed to create a ProcessSingleton", which would wedge run_forever.sh.
+    for (const lock of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+        try {
+            fs.rmSync(path.join(cachePath, lock), { force: true });
+        } catch (e) { /* ignore */ }
     }
+    const args = ['--no-sandbox', '--disk-cache-size=104857600'];
+    // keeps the previous hardcoded proxy as the default; set to null to disable
+    const proxy = loginContext.proxy_server === undefined ? 'http://localhost:10809' : loginContext.proxy_server;
+    if (proxy) args.push(`--proxy-server=${proxy}`);
+    global.browser = await puppeteer.launch({
+        headless: loginContext.headless === undefined ? "new" : loginContext.headless,
+        args,
+        userDataDir: cachePath
+    });
+    for (const user of global.nagaUsers.users) {
+        // Ask NAGA whether the stored cookies still work rather than trusting a
+        // stored expiry -- imported cookies may not carry one at all.
+        let alive = false;
+        if ((user.cookies || []).some(c => c.name === SESSION_COOKIE)) {
+            try {
+                alive = await verify_cookies(user);
+            } catch (e) {
+                log(`NAGA USER ${user.username} 会话检查失败: ${e.toString()}`);
+            }
+        }
+        user.login = alive;
+        if (alive) {
+            const days = days_until_expiry(user);
+            log(`NAGA USER ${user.username} 复用已保存的会话${days === null ? '' : `，剩余 ${days.toFixed(1)} 天`}`);
+        } else {
+            log(`NAGA USER ${user.username} 会话不可用，请在本机浏览器登录 https://naga.dmv.nico/ 后导入 cookie（POST /import_cookies，或运行 node local_login.js）`);
+        }
+    }
+    await session_watchdog();
+    setInterval(session_watchdog, 6 * 3600 * 1000);
 })();

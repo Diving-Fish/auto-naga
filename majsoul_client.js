@@ -18,27 +18,52 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RES_DIR = path.join(__dirname, "majsoul_res");
 
-const CLIENT_VERSION = "4.0.44"; // Unity web client version; used for client_version_string
-const ROUTES_URL = `https://route-5.maj-soul.com/api/clientgate/routes?platform=Web&version=${CLIENT_VERSION}&lang=chs_t`;
+// The gateway rejects any login whose client_version_string is not the version currently
+// deployed on the web client (error 151, "游戏版本过旧"), so it has to be read from the game
+// page rather than pinned here -- this constant is only the fallback if that read fails.
+const FALLBACK_CLIENT_VERSION = "4.0.46";
+const GAME_PAGE_URL = "https://game.maj-soul.com/1/";
+const routesUrl = (version) =>
+    `https://route-5.maj-soul.com/api/clientgate/routes?platform=Web&version=${version}&lang=chs_t`;
 
 const MSG_TYPE = { NOTIFY: 1, REQUEST: 2, RESPONSE: 3 };
 
-function httpsJson(url) {
+function httpsText(url) {
     return new Promise((resolve, reject) => {
         https
             .get(url, (r) => {
                 let buf = "";
                 r.on("data", (d) => (buf += d));
-                r.on("end", () => {
-                    try {
-                        resolve(JSON.parse(buf));
-                    } catch (e) {
-                        reject(new Error(`bad JSON from ${url}: ${buf.slice(0, 120)}`));
-                    }
-                });
+                r.on("end", () => resolve(buf));
             })
             .on("error", reject);
     });
+}
+
+async function httpsJson(url) {
+    const buf = await httpsText(url);
+    try {
+        return JSON.parse(buf);
+    } catch (e) {
+        throw new Error(`bad JSON from ${url}: ${buf.slice(0, 120)}`);
+    }
+}
+
+// The Unity loader in the game page carries the deployed build number, both as the
+// `productVersion` passed to createUnityInstance and in the Build/*.loader.js filename.
+let _clientVersion = null;
+async function getClientVersion() {
+    if (_clientVersion) return _clientVersion;
+    try {
+        const html = await httpsText(GAME_PAGE_URL);
+        const m = html.match(/productVersion:\s*"([\d.]+)"/) || html.match(/-release-([\d.]+)\(\d+\)\.loader\.js/);
+        if (m) {
+            _clientVersion = m[1];
+            return _clientVersion;
+        }
+    } catch (e) { /* fall through to the pinned version */ }
+    _clientVersion = FALLBACK_CLIENT_VERSION;
+    return _clientVersion;
 }
 
 // Lazily loaded shared protobuf root + config maps (parsed once per process).
@@ -47,7 +72,10 @@ let _configMaps = null;
 
 function getRoot() {
     if (!_root) {
-        _root = protobuf.Root.fromJSON(JSON.parse(fs.readFileSync(path.join(RES_DIR, "liqi.json"))));
+        const json = JSON.parse(fs.readFileSync(path.join(RES_DIR, "liqi.json")));
+        // The live client sends a platform tag the shipped descriptor does not declare yet.
+        json.nested.lq.nested.ReqRequestConnection.fields.platform = { type: "string", id: 6 };
+        _root = protobuf.Root.fromJSON(json);
     }
     return _root;
 }
@@ -92,6 +120,7 @@ class MajsoulConnection {
         this.Wrapper = this.root.lookupType("lq.Wrapper");
         this.reqIndex = 0;
         this.pending = {};
+        this.heartbeatTimer = null;
     }
 
     connect() {
@@ -134,12 +163,17 @@ class MajsoulConnection {
 
     // Call a Lobby RPC. Returns the decoded response object.
     rpc(methodName, reqTypeName, respTypeName, payload, timeoutMs = 20000) {
+        return this.serviceRpc("Lobby", methodName, reqTypeName, respTypeName, payload, timeoutMs);
+    }
+
+    // Call an RPC on any gateway service (`Lobby`, `Route`, ...).
+    serviceRpc(service, methodName, reqTypeName, respTypeName, payload, timeoutMs = 20000) {
         return new Promise((resolve, reject) => {
             const ReqType = this.root.lookupType(reqTypeName);
             const RespType = this.root.lookupType(respTypeName);
             const reqBytes = ReqType.encode(ReqType.fromObject(payload)).finish();
             const wrapperBytes = this.Wrapper.encode(
-                this.Wrapper.fromObject({ name: `.lq.Lobby.${methodName}`, data: reqBytes })
+                this.Wrapper.fromObject({ name: `.lq.${service}.${methodName}`, data: reqBytes })
             ).finish();
             const index = this.reqIndex++ % 60007;
             const frame = Buffer.concat([Buffer.from([MSG_TYPE.REQUEST, index & 0xff, (index >> 8) & 0xff]), wrapperBytes]);
@@ -158,7 +192,26 @@ class MajsoulConnection {
         });
     }
 
+    // The gateway drops connections that stop sending .lq.Route.heartbeat, so a connection
+    // that is parked between requests has to keep one going itself.
+    startHeartbeat(intervalMs = 5000) {
+        this.stopHeartbeat();
+        this.heartbeatTimer = setInterval(() => {
+            this.serviceRpc("Route", "heartbeat", "lq.ReqHeartbeat", "lq.ResHeartbeat", { platform: 11 })
+                .catch(() => { /* a dead connection is noticed by the next real request */ });
+        }, intervalMs);
+        if (this.heartbeatTimer.unref) this.heartbeatTimer.unref();
+    }
+
+    stopHeartbeat() {
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+    }
+
     close() {
+        this.stopHeartbeat();
         if (this.ws) {
             try { this.ws.close(); } catch (e) { /* ignore */ }
             this.ws = null;
@@ -166,19 +219,34 @@ class MajsoulConnection {
     }
 }
 
-async function pickEndpoint() {
-    const routesResp = await httpsJson(ROUTES_URL);
+async function pickRoute(version) {
+    const routesResp = await httpsJson(routesUrl(version));
     const routes = (routesResp.data.routes || []).filter((r) => r.ssl);
     if (routes.length === 0) throw new Error("no gateway routes available");
-    const route = routes[Math.floor(Math.random() * routes.length)];
-    return `wss://${route.domain}/gateway`;
+    return routes[Math.floor(Math.random() * routes.length)];
 }
 
 // Log in with account/password (HMAC-SHA256, key "lailai") and return a live connection.
 async function loginConnection(username, password) {
-    const endpoint = await pickEndpoint();
-    const conn = new MajsoulConnection(endpoint);
+    const version = await getClientVersion();
+    const route = await pickRoute(version);
+    const conn = new MajsoulConnection(`wss://${route.domain}/gateway`);
     await conn.connect();
+
+    // The gateway now front-ends the lobby with a routing service: until the connection is
+    // registered with .lq.Route.requestConnection every Lobby call is answered as if it came
+    // from an outdated client (login -> 151, everything else -> 1004).
+    const routeRes = await conn.serviceRpc("Route", "requestConnection", "lq.ReqRequestConnection", "lq.ResRequestConnection", {
+        type: 1,
+        route_id: route.id,
+        timestamp: Math.floor(Date.now() / 1000),
+        platform: "Web", // not in the shipped liqi.json; added in getRoot()
+    });
+    if (routeRes.error && routeRes.error.code) {
+        conn.close();
+        throw new Error(`majsoul route handshake failed: code ${routeRes.error.code}`);
+    }
+
     const passHmac = crypto.createHmac("sha256", "lailai").update(password).digest("hex");
     const res = await conn.rpc("login", "lq.ReqLogin", "lq.ResLogin", {
         account: username,
@@ -186,13 +254,14 @@ async function loginConnection(username, password) {
         device: { is_browser: true },
         random_key: randomUUID(),
         gen_access_token: true,
-        client_version_string: `web-${CLIENT_VERSION}`,
+        client_version_string: `web-${version}`,
         currency_platforms: [2],
     });
     if (res.error && res.error.code) {
         conn.close();
         throw new Error(`majsoul login failed: code ${res.error.code} ${res.error.json_param || ""}`);
     }
+    conn.startHeartbeat();
     return { conn, account_id: res.account_id, access_token: res.access_token };
 }
 
@@ -202,7 +271,7 @@ async function fetchPaipuData(conn, paipuUuid) {
     const realUuid = String(paipuUuid).split("_")[0];
     const recRes = await conn.rpc("fetchGameRecord", "lq.ReqGameRecord", "lq.ResGameRecord", {
         game_uuid: realUuid,
-        client_version_string: `web-${CLIENT_VERSION}`,
+        client_version_string: `web-${await getClientVersion()}`,
     });
     if (recRes.error && recRes.error.code) {
         throw new Error(`fetchGameRecord failed: code ${recRes.error.code}`);

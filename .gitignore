@@ -5,3 +5,4 @@ naga_user.json
 puppeteer_cache
 screenshots
 *.png
+*.log
