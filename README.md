@@ -50,7 +50,36 @@ and a Turnstile token cannot be moved between browsers. So the login has to
 happen in a real browser on a normal connection, and only the resulting NAGA
 session cookie travels to the server.
 
-### Recommended: import the cookie (nothing to install)
+### One-click sync with Tampermonkey
+
+Install [naga-cookie-sync.user.js](https://raw.githubusercontent.com/Diving-Fish/auto-naga/main/userscripts/naga-cookie-sync.user.js)
+from GitHub in Tampermonkey, then open `https://naga.dmv.nico/` and log in.
+The bottom-right **一键同步 NAGA** panel lets you configure **Secret** and **Remote**;
+changes are automatically saved in Tampermonkey storage. Click sync to import and
+verify the current session. Nothing is uploaded automatically on page load.
+
+Remote defaults to `http://www.diving-fish.com:3165/import_cookies/ui`.
+You can enter an import UI URL, an `/import_cookies` API URL, or a server base URL
+(including a reverse-proxy path prefix). The script sends JSON to `/import_cookies`
+using `GM_xmlhttpRequest`; allow access to your configured server when Tampermonkey
+asks. The default HTTP endpoint transmits Secret and cookies without encryption;
+use an HTTPS remote if your server provides one.
+
+**Compatibility:** [Tampermonkey documents HttpOnly cookie access as Beta-only](https://www.tampermonkey.net/documentation.php?q=GM_cookie).
+Use Tampermonkey Beta if the NAGA session cookie is HttpOnly. Other script managers
+are not guaranteed to support `GM_cookie`. If the session or CSRF cookie cannot be
+read, the script opens a dialog explaining how to copy both values from browser
+DevTools (F12). Paste them and click **导入并验证** to upload using the saved settings.
+Pasted cookies are used only for that submission and are not saved in script storage;
+the original manual import page below also remains available.
+Only `naga-report-session-id` and `csrftoken` are uploaded. Cookie expiry is preserved
+when returned by the extension API.
+
+The standalone script lives at `userscripts/naga-cookie-sync.user.js`. Publishing
+that file on the repository's `main` branch makes the installation URL available;
+bump its `@version` for subsequent updates. No server changes are required.
+
+### Manual import (nothing to install)
 
 1. Open `http://your-server:3165/import_cookies/ui` in your own browser.
 2. In another tab log in to `https://naga.dmv.nico/` as usual.
